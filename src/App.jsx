@@ -1,6 +1,11 @@
 
 import React, { useEffect, useState } from 'react';
 
+// Supabase adapter (auto-inserted)
+import { loadAll, addBikeSupabase, addClientIfNeededSupabase, rentBikeSupabase, addPaymentSupabase, processReturnSupabase, addMoneyRecordSupabase } from './supabase_patch/supabaseAdapter';
+const USE_SUPABASE = Boolean(process.env.REACT_APP_SUPABASE_URL && process.env.REACT_APP_SUPABASE_ANON_KEY);
+
+
 // CRM MVP — обновлённая версия: топ-5 фич
 // 1) История платежей (просмотр/редактирование/удаление)
 // 2) Отчёты и баланс кассы + экспорт CSV/JSON
@@ -33,6 +38,24 @@ export default function App() {
   useEffect(() => localStorage.setItem('sales', JSON.stringify(sales)), [sales]);
   useEffect(() => localStorage.setItem('allowedDays', String(allowedDaysBeforeOverdue)), [allowedDaysBeforeOverdue]);
 
+// Load data from Supabase on start if enabled
+useEffect(() => {
+  if (!USE_SUPABASE) return;
+  (async () => {
+    try {
+      const res = await loadAll();
+      setBikes(res.bikes || []);
+      setClients(res.clients || []);
+      setRentals(res.rentals || []);
+      setExpenses((res.money||[]).filter(m=>m.kind==='expenses'));
+      setWriteoffs((res.money||[]).filter(m=>m.kind==='writeoffs'));
+      setSales((res.money||[]).filter(m=>m.kind==='sales'));
+    } catch (err) {
+      console.error('Supabase load error', err);
+    }
+  })();
+}, []);
+
   // UI state
   const [showAddBike, setShowAddBike] = useState(false);
   const [selectedBike, setSelectedBike] = useState(null);
@@ -52,75 +75,145 @@ export default function App() {
   const [moneyFormType, setMoneyFormType] = useState('expenses');
 
   // helpers
-  const addBike = (bike) => { setBikes(prev => [...prev, { ...bike, id: Date.now() }]); setShowAddBike(false); };
-  const addClientIfNeeded = (client) => {
-    const found = clients.find(c => c.phone === client.phone && c.name === client.name);
-    if (found) return found.id;
-    const id = Date.now();
-    setClients(prev => [...prev, { ...client, id }]);
-    return id;
-  };
+  
+const addBike = async (bike) => {
+  if (USE_SUPABASE) {
+    try {
+      const data = await addBikeSupabase(bike);
+      setBikes(prev => [...prev, data]);
+      setShowAddBike(false);
+      return;
+    } catch(e) { console.error('addBike supabase error', e); alert('Ошибка добавления велосипеда: ' + e.message); return; }
+  }
+  // localStorage fallback
+  setBikes(prev => [...prev, { ...bike, id: Date.now() }]); setShowAddBike(false);
+};
+;
+  
+const addClientIfNeeded = async (client) => {
+  if (USE_SUPABASE) {
+    try {
+      const id = await addClientIfNeededSupabase(client);
+      return id;
+    } catch(e) { console.error('addClientIfNeeded supabase error', e); return null; }
+  }
+  // fallback local
+  const found = clients.find(c => c.phone === client.phone && c.name === client.name);
+  if (found) return found.id;
+  const id = Date.now();
+  setClients(prev => [...prev, { ...client, id }]);
+  return id;
+};
+;
 
-  const rentBike = ({ bikeId, client, deposit, startDate }) => {
-    const clientId = addClientIfNeeded(client);
-    const bike = bikes.find(b => b.id === bikeId);
-    if (!bike || bike.status === 'rented') return;
-    const start = startDate ? new Date(startDate).toISOString() : new Date().toISOString();
-    const id = Date.now();
-    const rental = { id, bikeId, clientId, start, end: null, priceTotal: null, paid: 0, deposit: Number(deposit || 0), depositRefunded: false, paymentsHistory: [] };
-    setRentals(prev => [...prev, rental]);
-    setBikes(prev => prev.map(b => b.id === bikeId ? { ...b, status: 'rented' } : b));
-    setShowRentForm(false);
-    setSelectedBike(null);
-  };
+  
 
-  const addPayment = (rentalId, amount, note) => {
-    if (!rentalId || Number(amount) <= 0) return;
-    const now = new Date().toISOString();
-    setRentals(prev => prev.map(r => r.id === rentalId ? { ...r, paid: (r.paid || 0) + Number(amount), paymentsHistory: [...(r.paymentsHistory||[]), { id: Date.now(), amount: Number(amount), date: now, note }] } : r));
-    setShowPaymentForm(false);
-    setPaymentTargetRentalId(null);
-  };
 
-  const editPayment = (rentalId, paymentId, newAmount, newNote) => {
-    setRentals(prev => prev.map(r => {
-      if (r.id !== rentalId) return r;
-      const ph = (r.paymentsHistory || []).map(p => p.id === paymentId ? { ...p, amount: Number(newAmount), note: newNote } : p);
-      // recalc paid
-      const newPaid = ph.reduce((s, x) => s + Number(x.amount), 0);
-      return { ...r, paymentsHistory: ph, paid: newPaid };
-    }));
-  };
+const rentBike = async ({ bikeId, client, deposit, startDate }) => {
+  if (USE_SUPABASE) {
+    try {
+      const data = await rentBikeSupabase({ bikeId, client, deposit, startDate });
+      setRentals(prev => [...prev, { ...data, paymentsHistory: [] }]);
+      setBikes(prev => prev.map(b => b.id === bikeId ? { ...b, status: 'rented' } : b));
+      setShowRentForm(false);
+      setSelectedBike(null);
+      return;
+    } catch (e) {
+      console.error('rentBike supabase error', e);
+      alert('Ошибка аренды: ' + (e.message || e));
+      return;
+    }
+  }
+  // fallback local
+  const clientId = await addClientIfNeeded(client);
+  const bike = bikes.find(b => b.id === bikeId);
+  if (!bike || bike.status === 'rented') return;
+  const start = startDate ? new Date(startDate).toISOString() : new Date().toISOString();
+  const id = Date.now();
+  const rental = { id, bikeId, clientId, start, end: null, priceTotal: null, paid: 0, deposit: Number(deposit || 0), depositRefunded: false, paymentsHistory: [] };
+  setRentals(prev => [...prev, rental]);
+  setBikes(prev => prev.map(b => b.id === bikeId ? { ...b, status: 'rented' } : b));
+  setShowRentForm(false);
+  setSelectedBike(null);
+};
+;
+const addPayment = async (rentalId, amount, note) => {
+  if (!rentalId || Number(amount) <= 0) return;
+  if (USE_SUPABASE) {
+    try {
+      const p = await addPaymentSupabase(rentalId, amount, note);
+      setRentals(prev => prev.map(r => r.id === rentalId ? { ...r, paid: (r.paid || 0) + Number(amount), paymentsHistory: [...(r.paymentsHistory || []), p] } : r));
+      setShowPaymentForm(false);
+      setPaymentTargetRentalId(null);
+      return;
+    } catch (e) {
+      console.error('addPayment supabase error', e);
+      alert('Ошибка платежа: ' + (e.message || e));
+      return;
+    }
+  }
+  const now = new Date().toISOString();
+  setRentals(prev => prev.map(r => r.id === rentalId ? { ...r, paid: (r.paid || 0) + Number(amount), paymentsHistory: [...(r.paymentsHistory || []), { id: Date.now(), amount: Number(amount), date: now, note }] } : r));
+  setShowPaymentForm(false);
+  setPaymentTargetRentalId(null);
+};
 
-  const deletePayment = (rentalId, paymentId) => {
-    setRentals(prev => prev.map(r => {
-      if (r.id !== rentalId) return r;
-      const ph = (r.paymentsHistory || []).filter(p => p.id !== paymentId);
-      const newPaid = ph.reduce((s, x) => s + Number(x.amount), 0);
-      return { ...r, paymentsHistory: ph, paid: newPaid };
-    }));
-  };
 
-  const processReturn = (rentalId, extraPaid = 0) => {
-    const now = new Date();
-    const rental = rentals.find(r => r.id === rentalId);
-    if (!rental) return;
-    const bike = bikes.find(b => b.id === rental.bikeId);
-    const start = new Date(rental.start);
-    const days = Math.max(1, Math.ceil((now - start) / MS_PER_DAY));
-    const priceTotal = (bike?.pricePerDay || 0) * days;
-    const paidBefore = rental.paid || 0;
-    const paidNow = paidBefore + Number(extraPaid || 0);
-    const updated = rentals.map(r => r.id === rentalId ? { ...r, end: now.toISOString(), priceTotal, paid: paidNow } : r);
-    setRentals(updated);
-    setBikes(prev => prev.map(b => b.id === rental.bikeId ? { ...b, status: 'free' } : b));
-    setShowReturnForm(false);
-    setReturnTargetRentalId(null);
-  };
+const processReturn = async (rentalId, extraPaid = 0) => {
+  if (USE_SUPABASE) {
+    try {
+      const res = await processReturnSupabase(rentalId, extraPaid, bikes, rentals);
+      setRentals(prev => prev.map(r => r.id === rentalId ? { ...r, end: res.end, priceTotal: res.priceTotal, paid: res.paidNow } : r));
+      const rental = rentals.find(r=>r.id===rentalId) || {};
+      const bikeId = rental.bike_id || rental.bikeId;
+      setBikes(prev => prev.map(b => b.id === bikeId ? { ...b, status: 'free' } : b));
+      setShowReturnForm(false);
+      setReturnTargetRentalId(null);
+      return;
+    } catch (e) {
+      console.error('processReturn supabase error', e);
+      alert('Ошибка при закрытии: ' + (e.message || e));
+      return;
+    }
+  }
+  // fallback local behavior
+  const now = new Date();
+  const rental = rentals.find(r => r.id === rentalId);
+  if (!rental) return;
+  const bike = bikes.find(b => b.id === rental.bikeId);
+  const start = new Date(rental.start);
+  const days = Math.max(1, Math.ceil((now - start) / MS_PER_DAY));
+  const priceTotal = (bike?.pricePerDay || 0) * days;
+  const paidBefore = rental.paid || 0;
+  const paidNow = paidBefore + Number(extraPaid || 0);
+  const updated = rentals.map(r => r.id === rentalId ? { ...r, end: now.toISOString(), priceTotal, paid: paidNow } : r);
+  setRentals(updated);
+  setBikes(prev => prev.map(b => b.id === rental.bikeId ? { ...b, status: 'free' } : b));
+  setShowReturnForm(false);
+  setReturnTargetRentalId(null);
+};
+
+;
 
   const refundDeposit = (rentalId) => { setRentals(prev => prev.map(r => r.id === rentalId ? { ...r, depositRefunded: true } : r)); };
 
-  const addMoneyRecord = (type, record) => { const obj = { ...record, id: Date.now() }; if (type === 'expenses') setExpenses(prev => [obj, ...prev]); if (type === 'writeoffs') setWriteoffs(prev => [obj, ...prev]); if (type === 'sales') setSales(prev => [obj, ...prev]); };
+  
+const addMoneyRecord = async (type, record) => {
+  if (USE_SUPABASE) {
+    try {
+      const data = await addMoneyRecordSupabase(type, record);
+      if (type === 'expenses') setExpenses(prev => [data, ...prev]);
+      if (type === 'writeoffs') setWriteoffs(prev => [data, ...prev]);
+      if (type === 'sales') setSales(prev => [data, ...prev]);
+      return;
+    } catch(e){ console.error('addMoneyRecord supabase error', e); alert('Ошибка добавления записи: ' + e.message); return; }
+  }
+  const obj = { ...record, id: Date.now() };
+  if (type === 'expenses') setExpenses(prev => [obj, ...prev]);
+  if (type === 'writeoffs') setWriteoffs(prev => [obj, ...prev]);
+  if (type === 'sales') setSales(prev => [obj, ...prev]);
+};
+;
   const deleteMoneyRecord = (type, id) => { if (type === 'expenses') setExpenses(prev => prev.filter(x=>x.id!==id)); if (type === 'writeoffs') setWriteoffs(prev => prev.filter(x=>x.id!==id)); if (type === 'sales') setSales(prev => prev.filter(x=>x.id!==id)); };
 
   // derived data
